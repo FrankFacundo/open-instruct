@@ -21,12 +21,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Empty
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import ray
 import torch
-import vllm
+
+if TYPE_CHECKING:
+    import vllm
 from datasets import Dataset
 from olmo_core.data import data_loader
 from ray.util import queue as ray_queue
@@ -541,7 +543,7 @@ def add_prompt_to_generator(
 
 def accumulate_inference_batches(
     inference_results_Q: ray_queue.Queue,
-    generation_config: vllm.SamplingParams,
+    generation_config: "vllm.SamplingParams",
     num_prompts: int,
     model_dims: utils.ModelDims,
     tokenizer: PreTrainedTokenizer,

@@ -20,14 +20,29 @@ from typing import Any
 
 import ray
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-from vllm.tool_parsers import ToolParser as VllmNativeToolParser
+
+try:
+    from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+    from vllm.tool_parsers import ToolParser as VllmNativeToolParser
+
+    VLLM_AVAILABLE = True
+    _VLLM_IMPORT_ERROR = None
+except Exception as exc:
+    ChatCompletionRequest = None
+    VllmNativeToolParser = None
+    VLLM_AVAILABLE = False
+    _VLLM_IMPORT_ERROR = exc
 
 from open_instruct.logger_utils import setup_logger
 from open_instruct.tools.utils import ToolCall
 from open_instruct.utils import import_class_from_string
 
 logger = setup_logger(__name__)
+
+
+def _require_vllm() -> None:
+    if not VLLM_AVAILABLE:
+        raise RuntimeError("vLLM is required for vllm_* tool parsers but is not installed.") from _VLLM_IMPORT_ERROR
 
 
 class ToolParser(ABC):
@@ -151,6 +166,7 @@ class VllmToolParser(ToolParser):
 
         Usually these only need the list of tools.
         """
+        _require_vllm()
         return ChatCompletionRequest(model="dummy", messages=[], tools=self._tool_definitions)
 
     def get_tool_calls(self, text: str) -> list[ToolCall]:
@@ -250,6 +266,7 @@ def create_vllm_parser(
     Returns:
         VllmToolParser configured for the specified model family.
     """
+    _require_vllm()
     if parser_name not in VLLM_PARSERS:
         available = list(VLLM_PARSERS.keys())
         raise ValueError(f"Unknown parser: {parser_name}. Available: {available}")
@@ -302,7 +319,10 @@ class DRTuluToolParser(ToolParser):
 
 def get_available_parsers() -> list[str]:
     """Return list of available parser types."""
-    return ["legacy", "dr_tulu"] + list(VLLM_PARSERS.keys())
+    parsers = ["legacy", "dr_tulu"]
+    if VLLM_AVAILABLE:
+        parsers.extend(VLLM_PARSERS.keys())
+    return parsers
 
 
 def create_tool_parser(

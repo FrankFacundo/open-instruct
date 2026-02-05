@@ -3,12 +3,14 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock
 
-import vllm
+import pytest
 from parameterized import parameterized
 
 from open_instruct import vllm_utils
 from open_instruct.data_types import PromptRequest
 from open_instruct.utils import ModelDims
+
+vllm = pytest.importorskip("vllm")
 
 
 class TestTruncateToolOutputTokens(unittest.TestCase):

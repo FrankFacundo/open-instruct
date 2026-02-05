@@ -1,6 +1,7 @@
 import os
 import subprocess
 
+from huggingface_hub import constants as hf_constants
 from transformers.utils import hub as transformers_hub
 
 WEKA_CLUSTERS = ["ai2/jupiter", "ai2/saturn", "ai2/titan", "ai2/neptune", "ai2/ceres", "ai2/triton", "ai2/rhea"]
@@ -15,11 +16,7 @@ def custom_cached_file(model_name_or_path: str, filename: str, revision: str | N
             return None
     else:
         resolved_file = transformers_hub.try_to_load_from_cache(
-            model_name_or_path,
-            filename,
-            cache_dir=transformers_hub.TRANSFORMERS_CACHE,
-            revision=revision,
-            repo_type=repo_type,
+            model_name_or_path, filename, cache_dir=hf_constants.HF_HUB_CACHE, revision=revision, repo_type=repo_type
         )
         if not isinstance(resolved_file, str):
             return None

@@ -28,20 +28,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # isort: off
-import contextlib
 import os
 import pathlib
 from concurrent import futures
 from datetime import timedelta
 
 os.environ["NCCL_CUMEM_ENABLE"] = "0"  # NOQA
-with contextlib.suppress(Exception):
+try:
     import deepspeed
     from deepspeed.runtime.sequence_parallel.ulysses_sp import UlyssesSPAttentionHF
     from deepspeed.utils import groups
 
+    _DEEPSPEED_IMPORT_ERROR = None
+except Exception as exc:
+    deepspeed = None
+    UlyssesSPAttentionHF = None
+    groups = None
+    _DEEPSPEED_IMPORT_ERROR = exc
+
 from open_instruct import data_loader as data_loader_lib
-from open_instruct import data_types, grpo_utils, utils
+from open_instruct import data_types, grpo_local, grpo_utils, utils
 from open_instruct.data_loader import DataPreparationActor, accumulate_inference_batches, add_prompt_to_generator
 
 # isort: on
@@ -127,6 +133,14 @@ from open_instruct.utils import (
 )
 
 logger = logger_utils.setup_logger(__name__)
+
+
+def _require_deepspeed() -> None:
+    if deepspeed is None:
+        raise RuntimeError(
+            "DeepSpeed is required for GRPO training but is not installed."
+        ) from _DEEPSPEED_IMPORT_ERROR
+
 
 CHECKPOINT_COMPLETE_MARKER = ".checkpoint_complete"
 WEIGHT_SYNC_TIMEOUT_S = 120.0
@@ -2027,6 +2041,14 @@ def main(
     vllm_config: data_loader_lib.VLLMConfig,
     tools_config: ToolsConfig,
 ):
+    if args.runtime_backend == "local":
+        return grpo_local.main_local(args, tc, model_config, streaming_config, vllm_config, tools_config)
+    _require_deepspeed()
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "GRPO training requires CUDA for the 'cuda' backend. "
+            "Use --runtime_backend local for CPU/MPS single-machine training."
+        )
     tokenizer = make_tokenizer(tc, model_config)
     args = setup_runtime_variables(args, streaming_config, tools_config)
     validate_configs(streaming_config, vllm_config, tuple(args.num_learners_per_node), args.sequence_parallel_size)

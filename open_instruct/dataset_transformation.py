@@ -634,6 +634,37 @@ CHAT_TEMPLATES = {
     ),
 }
 
+FALLBACK_CHAT_TEMPLATE_NAME = "simple_chat"
+
+
+def _set_chat_template_with_fallback(tokenizer: PreTrainedTokenizer, tc: "TokenizerConfig") -> None:
+    if tc.chat_template_name in CHAT_TEMPLATES:
+        tokenizer.chat_template = CHAT_TEMPLATES[tc.chat_template_name]
+        return
+
+    if tc.chat_template_name is None:
+        template = None
+        try:
+            template = AutoTokenizer.from_pretrained(
+                tc.tokenizer_name_or_path, revision=tc.tokenizer_revision
+            ).chat_template
+        except Exception:
+            template = None
+
+        if template:
+            tokenizer.chat_template = template
+            return
+
+        tokenizer.chat_template = CHAT_TEMPLATES[FALLBACK_CHAT_TEMPLATE_NAME]
+        logger.warning(
+            "Tokenizer %s has no chat template. Falling back to '%s'. Set --chat_template_name to override.",
+            tc.tokenizer_name_or_path,
+            FALLBACK_CHAT_TEMPLATE_NAME,
+        )
+        return
+
+    raise ValueError(f"Could not find chat template for {tc.chat_template_name}.")
+
 
 def get_tokenizer_simple_v1(tc: "TokenizerConfig"):
     tokenizer = AutoTokenizer.from_pretrained(
@@ -683,15 +714,7 @@ def get_tokenizer_tulu_v1(tc: "TokenizerConfig"):
     # set the tokenizer chat template to the training format
     # this will be used for encoding the training examples
     # and saved together with the tokenizer to be used later.
-    if tc.chat_template_name in CHAT_TEMPLATES:
-        tokenizer.chat_template = CHAT_TEMPLATES[tc.chat_template_name]
-    else:
-        try:
-            tokenizer.chat_template = AutoTokenizer.from_pretrained(
-                tc.tokenizer_name_or_path, revision=tc.tokenizer_revision
-            ).chat_template
-        except Exception:
-            raise ValueError(f"Could not find chat template for {tc.tokenizer_name_or_path}.") from None
+    _set_chat_template_with_fallback(tokenizer, tc)
 
     if tc.add_bos:
         if tokenizer.chat_template.startswith("{{ bos_token }}") or (
@@ -749,17 +772,7 @@ def get_tokenizer_tulu_v2_1(tc: "TokenizerConfig"):
     # set the tokenizer chat template to the training format
     # this will be used for encoding the training examples
     # and saved together with the tokenizer to be used later.
-    if tc.chat_template_name is None:
-        try:
-            tokenizer.chat_template = AutoTokenizer.from_pretrained(
-                tc.tokenizer_name_or_path, revision=tc.tokenizer_revision
-            ).chat_template
-        except Exception:
-            raise ValueError(f"Could not find chat template for {tc.tokenizer_name_or_path}.") from None
-    elif tc.chat_template_name in CHAT_TEMPLATES:
-        tokenizer.chat_template = CHAT_TEMPLATES[tc.chat_template_name]
-    else:
-        raise ValueError(f"Could not find chat template for {tc.chat_template_name}.")
+    _set_chat_template_with_fallback(tokenizer, tc)
 
     if tc.add_bos:
         if tokenizer.chat_template.startswith("{{ bos_token }}") or (
@@ -830,15 +843,7 @@ def get_tokenizer_tulu_v2_2(tc: "TokenizerConfig"):
     # set the tokenizer chat template to the training format
     # this will be used for encoding the training examples
     # and saved together with the tokenizer to be used later.
-    if tc.chat_template_name in CHAT_TEMPLATES:
-        tokenizer.chat_template = CHAT_TEMPLATES[tc.chat_template_name]
-    else:
-        try:
-            tokenizer.chat_template = AutoTokenizer.from_pretrained(
-                tc.tokenizer_name_or_path, revision=tc.tokenizer_revision
-            ).chat_template
-        except Exception:
-            raise ValueError(f"Could not find chat template for {tc.tokenizer_name_or_path}.") from None
+    _set_chat_template_with_fallback(tokenizer, tc)
 
     if tc.add_bos:
         if tokenizer.chat_template.startswith("{{ bos_token }}") or (
@@ -934,6 +939,31 @@ def remove_dataset_source_field(dataset: Dataset) -> Dataset:
 
 TOOLS_COLUMN_KEY = "tools"
 
+
+def _filter_to_target_columns(dataset: Dataset, target_columns: list[str]) -> Dataset:
+    """Drop non-target columns while preserving required metadata columns.
+
+    The dataset "index" column is kept if present to support HFDataLoader.
+    Dataset source and tools columns are preserved if present to keep
+    per-sample metadata available for downstream use.
+    """
+    missing_columns = [col for col in target_columns if col not in dataset.column_names]
+    if missing_columns:
+        raise ValueError(
+            "Target columns missing from dataset: "
+            f"{missing_columns}. Available columns: {dataset.column_names}"
+        )
+
+    columns_to_keep = list(target_columns)
+    for column in (DATASET_ORIGIN_KEY, TOOLS_COLUMN_KEY, "index"):
+        if column in dataset.column_names and column not in columns_to_keep:
+            columns_to_keep.append(column)
+
+    columns_to_remove = [col for col in dataset.column_names if col not in columns_to_keep]
+    if columns_to_remove:
+        dataset = dataset.remove_columns(columns_to_remove)
+    return dataset
+
 # Cache version: increment this when transformation logic changes significantly
 # to invalidate old caches. v2: Added per-sample tool filtering in rlvr_tokenize_v3.
 DATASET_CACHE_VERSION = "v2"
@@ -1017,8 +1047,8 @@ def sft_tokenize_v1(
 ):
     prompt = row[sft_messages_key] if len(row[sft_messages_key]) == 1 else row[sft_messages_key][:-1]
 
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_PROMPT_KEY] = _apply_chat_template_no_dict(tokenizer, prompt, add_generation_prompt=True)
+    row[INPUT_IDS_KEY] = _apply_chat_template_no_dict(tokenizer, row[sft_messages_key])
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
     labels = copy.deepcopy(row[INPUT_IDS_KEY])
     row[LABELS_KEY] = labels
@@ -1032,8 +1062,8 @@ def sft_tokenize_mask_out_prompt_v1(
     """mask out the prompt tokens by manipulating labels"""
     prompt = row[sft_messages_key] if len(row[sft_messages_key]) == 1 else row[sft_messages_key][:-1]
 
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_PROMPT_KEY] = _apply_chat_template_no_dict(tokenizer, prompt, add_generation_prompt=True)
+    row[INPUT_IDS_KEY] = _apply_chat_template_no_dict(tokenizer, row[sft_messages_key])
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
     labels = copy.deepcopy(row[INPUT_IDS_KEY])
     labels[: len(row[INPUT_IDS_PROMPT_KEY])] = [-100] * len(row[INPUT_IDS_PROMPT_KEY])
@@ -1060,12 +1090,50 @@ def sft_filter_v1(
     return max_prompt_token_length_ok and max_token_length_ok and (contain_some_labels or not need_contain_labels)
 
 
+def _get_messages_from_row(row: dict[str, Any]) -> list[dict[str, str]]:
+    if "messages" in row:
+        return row["messages"]
+
+    if "prompt" in row and "completion" in row:
+        messages = [{"role": "user", "content": row["prompt"]}, {"role": "assistant", "content": row["completion"]}]
+        row["messages"] = messages
+        return messages
+
+    if "instruction" in row and "output" in row:
+        user_content = row["instruction"]
+        input_text = row.get("input")
+        if input_text:
+            user_content = f"{user_content}\n{input_text}"
+        messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": row["output"]}]
+        row["messages"] = messages
+        return messages
+
+    raise KeyError("messages")
+
+
+def _apply_chat_template_no_dict(tokenizer: PreTrainedTokenizer, *args, **kwargs):
+    # transformers>=5 defaults apply_chat_template(return_dict=True), which returns
+    # a BatchEncoding object and breaks downstream code that expects token ids.
+    kwargs_with_return_dict = dict(kwargs)
+    kwargs_with_return_dict.setdefault("return_dict", False)
+    try:
+        return tokenizer.apply_chat_template(*args, **kwargs_with_return_dict)
+    except TypeError as exc:
+        if "return_dict" not in str(exc):
+            raise
+        # Backward compatibility for transformers versions without `return_dict`.
+        kwargs_without_return_dict = dict(kwargs)
+        kwargs_without_return_dict.pop("return_dict", None)
+        return tokenizer.apply_chat_template(*args, **kwargs_without_return_dict)
+
+
 def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, max_seq_length: int):
     """taken directly from https://github.com/allenai/open-instruct/blob/ba11286e5b9eb00d4ce5b40ef4cac1389888416a/open_instruct/finetune.py#L385"""
-    messages = row["messages"]
+    messages = _get_messages_from_row(row)
     if len(messages) == 0:
         raise ValueError("messages field is empty.")
-    input_ids_result = tokenizer.apply_chat_template(
+    input_ids_result = _apply_chat_template_no_dict(
+        tokenizer,
         conversation=messages,
         tokenize=True,
         return_tensors="pt",
@@ -1074,8 +1142,12 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
         max_length=max_seq_length,
         add_generation_prompt=False,
     )
-    assert isinstance(input_ids_result, torch.Tensor)
-    input_ids = input_ids_result
+    if isinstance(input_ids_result, torch.Tensor):
+        input_ids = input_ids_result
+    else:
+        input_ids = torch.tensor(input_ids_result, dtype=torch.long)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
     labels = input_ids.clone()
     # mask the non-assistant part for avoiding loss
     for message_idx, message in enumerate(messages):
@@ -1084,7 +1156,8 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
             if message_idx == 0:
                 message_start_idx = 0
             else:
-                message_start_idx = tokenizer.apply_chat_template(
+                message_start_idx = _apply_chat_template_no_dict(
+                    tokenizer,
                     conversation=messages[:message_idx],  # here marks the end of the previous messages
                     tokenize=True,
                     return_tensors="pt",
@@ -1098,7 +1171,8 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
                 # for intermediate messages that follow with an assistant message, we need to
                 # set `add_generation_prompt=True` to avoid the assistant generation prefix being included in the loss
                 # (e.g., `<|assistant|>`)
-                message_end_idx = tokenizer.apply_chat_template(
+                message_end_idx = _apply_chat_template_no_dict(
+                    tokenizer,
                     conversation=messages[: message_idx + 1],
                     tokenize=True,
                     return_tensors="pt",
@@ -1110,7 +1184,8 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
             else:
                 # for the last message or the message that doesn't follow with an assistant message,
                 # we don't need to add the assistant generation prefix
-                message_end_idx = tokenizer.apply_chat_template(
+                message_end_idx = _apply_chat_template_no_dict(
+                    tokenizer,
                     conversation=messages[: message_idx + 1],
                     tokenize=True,
                     return_tensors="pt",
@@ -1132,10 +1207,11 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
 
 def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, max_seq_length: int):
     """taken directly from https://github.com/allenai/open-instruct/blob/ba11286e5b9eb00d4ce5b40ef4cac1389888416a/open_instruct/finetune.py#L385"""
-    messages = row["messages"]
+    messages = _get_messages_from_row(row)
     if len(messages) == 0:
         raise ValueError("messages field is empty.")
-    input_ids_result = tokenizer.apply_chat_template(
+    input_ids_result = _apply_chat_template_no_dict(
+        tokenizer,
         conversation=messages,
         tokenize=True,
         return_tensors="pt",
@@ -1144,8 +1220,12 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
         max_length=max_seq_length,
         add_generation_prompt=False,
     )
-    assert isinstance(input_ids_result, torch.Tensor)
-    input_ids = input_ids_result
+    if isinstance(input_ids_result, torch.Tensor):
+        input_ids = input_ids_result
+    else:
+        input_ids = torch.tensor(input_ids_result, dtype=torch.long)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
     labels = input_ids.clone()
     # mask all turns but the last for avoiding loss
     for message_idx, _message in enumerate(messages):
@@ -1154,7 +1234,8 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
             if message_idx == 0:
                 message_start_idx = 0
             else:
-                message_start_idx = tokenizer.apply_chat_template(
+                message_start_idx = _apply_chat_template_no_dict(
+                    tokenizer,
                     conversation=messages[:message_idx],  # here marks the end of the previous messages
                     tokenize=True,
                     return_tensors="pt",
@@ -1168,7 +1249,8 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
                 # for intermediate messages that follow with an assistant message, we need to
                 # set `add_generation_prompt=True` to avoid the assistant generation prefix being included in the loss
                 # (e.g., `<|assistant|>`)
-                message_end_idx = tokenizer.apply_chat_template(
+                message_end_idx = _apply_chat_template_no_dict(
+                    tokenizer,
                     conversation=messages[: message_idx + 1],
                     tokenize=True,
                     return_tensors="pt",
@@ -1180,7 +1262,8 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
             else:
                 # for the last message or the message that doesn't follow with an assistant message,
                 # we don't need to add the assistant generation prefix
-                message_end_idx = tokenizer.apply_chat_template(
+                message_end_idx = _apply_chat_template_no_dict(
+                    tokenizer,
                     conversation=messages[: message_idx + 1],
                     tokenize=True,
                     return_tensors="pt",
@@ -1209,15 +1292,15 @@ def preference_tokenize_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer):
     prompt = row["chosen"][:-1]
 
     # Tokenize prompt
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
+    row[INPUT_IDS_PROMPT_KEY] = _apply_chat_template_no_dict(tokenizer, prompt, add_generation_prompt=True)
     row[ATTENTION_MASK_PROMPT_KEY] = [1] * len(row[INPUT_IDS_PROMPT_KEY])
 
     # Tokenize chosen completion
-    row[CHOSEN_INPUT_IDS_KEY] = tokenizer.apply_chat_template(row["chosen"])
+    row[CHOSEN_INPUT_IDS_KEY] = _apply_chat_template_no_dict(tokenizer, row["chosen"])
     row[CHOSEN_ATTENTION_MASK_KEY] = [1] * len(row[CHOSEN_INPUT_IDS_KEY])
 
     # Tokenize rejected completion
-    row[REJECTED_INPUT_IDS_KEY] = tokenizer.apply_chat_template(row["rejected"])
+    row[REJECTED_INPUT_IDS_KEY] = _apply_chat_template_no_dict(tokenizer, row["rejected"])
     row[REJECTED_ATTENTION_MASK_KEY] = [1] * len(row[REJECTED_INPUT_IDS_KEY])
 
     return row
@@ -1348,12 +1431,10 @@ def rlvr_tokenize_v1(
         else:
             tools_for_template = tool_definitions
 
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(
-        prompt,
-        add_generation_prompt=True,
-        tools=tools_for_template,  # type: ignore[arg-type]
+    row[INPUT_IDS_PROMPT_KEY] = _apply_chat_template_no_dict(
+        tokenizer, prompt, add_generation_prompt=True, tools=tools_for_template
     )
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_KEY] = _apply_chat_template_no_dict(tokenizer, row[sft_messages_key])
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
     labels = copy.deepcopy(row[INPUT_IDS_KEY])
     row[LABELS_KEY] = labels
@@ -1372,8 +1453,8 @@ def rlvr_tokenize_v2(
     verifier_source_key: str = VERIFIER_SOURCE_KEY,
 ):
     prompt = row[sft_messages_key] if len(row[sft_messages_key]) == 1 else row[sft_messages_key][:-1]
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_PROMPT_KEY] = _apply_chat_template_no_dict(tokenizer, prompt, add_generation_prompt=True)
+    row[INPUT_IDS_KEY] = _apply_chat_template_no_dict(tokenizer, row[sft_messages_key])
     # weird issue with qwen: sometimes the padding token ends up in the input ids?
     # ill look into this more later, for now this guard should be enough
     if tokenizer.pad_token_id in row[INPUT_IDS_KEY]:
@@ -1435,10 +1516,8 @@ def rlvr_tokenize_v3(
         else:
             tools_for_template = tool_definitions
 
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(
-        prompt,
-        add_generation_prompt=True,
-        tools=tools_for_template,  # type: ignore[arg-type]
+    row[INPUT_IDS_PROMPT_KEY] = _apply_chat_template_no_dict(
+        tokenizer, prompt, add_generation_prompt=True, tools=tools_for_template
     )
     if tokenizer.pad_token_id in row[INPUT_IDS_PROMPT_KEY]:
         row[INPUT_IDS_PROMPT_KEY] = [x for x in row[INPUT_IDS_PROMPT_KEY] if x != tokenizer.pad_token_id]
@@ -2062,6 +2141,9 @@ def get_cached_dataset_tulu_with_statistics(
         cache = DatasetTransformationCache(config_hash=dataset_config_hash, hf_entity=hf_entity)
 
     dataset, statistics = cache.load_or_transform_dataset(dcs, tc, dataset_skip_cache=dataset_skip_cache)
+
+    if target_columns is not None:
+        dataset = _filter_to_target_columns(dataset, target_columns)
 
     if drop_dataset_source:
         dataset = remove_dataset_source_field(dataset)

@@ -85,6 +85,42 @@ bash scripts/train/tulu3/finetune_8b.sh
 
 **OLMo-core SFT**: For supported models (OLMo, OLMoE, Qwen3), we recommend the more GPU-efficient [OLMo-core SFT implementation](https://github.com/allenai/OLMo-core/tree/main/src/scripts/train/sft). See `open_instruct/olmo_core_utils.py` for the list of supported models.
 
+#### Mac (Apple Silicon, single machine)
+
+You can run SFT on a MacBook (M‑series) via PyTorch MPS. GRPO can also run locally on a single Mac with `--runtime_backend local`, which uses a single-process CPU/MPS loop (no DeepSpeed/vLLM) and is best suited for small models and debugging. DPO still requires CUDA GPUs. Flash attention, fused optimizer, and QLoRA/8‑bit optimizer are CUDA‑only and will be disabled or rejected automatically on non‑CUDA devices.
+
+Example minimal SFT run on MPS:
+
+```bash
+python open_instruct/finetune.py \
+  --model_name_or_path EleutherAI/pythia-14m \
+  --dataset_mixer_list HuggingFaceH4/testing_alpaca_small 1.0 \
+  --dataset_mixer_list_splits train \
+  --max_seq_length 512 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --num_train_epochs 1 \
+  --output_dir output
+```
+
+Tip: if you hit unsupported ops on MPS, set `PYTORCH_ENABLE_MPS_FALLBACK=1` to fall back to CPU for those ops (slower but more robust).
+
+Example minimal GRPO run on MPS (local backend, single machine):
+
+```bash
+python open_instruct/grpo_fast.py \
+  --runtime_backend local \
+  --model_name_or_path EleutherAI/pythia-14m \
+  --dataset_mixer_list ai2-adapt-dev/rlvr_gsm8k_zs 1.0 \
+  --dataset_mixer_list_splits train \
+  --total_episodes 128 \
+  --num_unique_prompts_rollout 4 \
+  --num_samples_per_prompt_rollout 2 \
+  --response_length 64 \
+  --per_device_train_batch_size 1 \
+  --output_dir output
+```
+
 
 ### Preference Tuning
 

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from parameterized import parameterized
 
 from open_instruct.tools.parsers import (
+    VLLM_AVAILABLE,
     VLLM_PARSERS,
     DRTuluToolParser,
     OpenInstructLegacyToolParser,
@@ -393,11 +394,17 @@ class TestGetAvailableParsers(unittest.TestCase):
     def test_contains_vllm_parsers(self):
         """Test that vLLM parsers are in the list."""
         parsers = get_available_parsers()
+        if not VLLM_AVAILABLE:
+            self.assertNotIn("vllm_hermes", parsers)
+            self.assertNotIn("vllm_llama3_json", parsers)
+            self.assertNotIn("vllm_olmo3", parsers)
+            return
         self.assertIn("vllm_hermes", parsers)
         self.assertIn("vllm_llama3_json", parsers)
         self.assertIn("vllm_olmo3", parsers)
 
 
+@unittest.skipUnless(VLLM_AVAILABLE, "vLLM not available")
 class TestVllmParserRegistry(unittest.TestCase):
     """Tests for vLLM parser registry and helpers."""
 
@@ -421,6 +428,7 @@ class TestVllmParserRegistry(unittest.TestCase):
         self.assertGreaterEqual(len(config.stop_sequences), 0, "stop_sequences must be a sized iterable")
 
 
+@unittest.skipUnless(VLLM_AVAILABLE, "vLLM not available")
 class TestVllmToolParser(unittest.TestCase):
     """Tests for VllmToolParser class."""
 
@@ -498,6 +506,7 @@ class TestCreateToolParser(unittest.TestCase):
         parser = create_tool_parser("dr_tulu", tokenizer=mock_tokenizer, tool_actors=[mock_actor])
         self.assertIsInstance(parser, DRTuluToolParser)
 
+    @unittest.skipUnless(VLLM_AVAILABLE, "vLLM not available")
     @parameterized.expand([(p,) for p in VLLM_PARSERS])
     def test_create_vllm_parser(self, parser_type):
         """Test creating vLLM parsers."""

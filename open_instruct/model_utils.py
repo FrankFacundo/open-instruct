@@ -16,20 +16,29 @@
 
 import asyncio
 import itertools
+import os
 import pathlib
 import tempfile
 from collections import OrderedDict, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import TYPE_CHECKING, Literal, Union
 
-import deepspeed
+try:
+    import deepspeed
+except Exception as exc:
+    deepspeed = None
+    _DEEPSPEED_IMPORT_ERROR = exc
+else:
+    _DEEPSPEED_IMPORT_ERROR = None
 import pandas as pd
 import torch
 import transformers
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
-from deepspeed.runtime.engine import DeepSpeedEngine
+
+if TYPE_CHECKING:
+    from deepspeed.runtime.engine import DeepSpeedEngine
 from huggingface_hub import HfApi
 from rich import print as rprint
 from rich.console import Console
@@ -247,6 +256,7 @@ def load_ref_policy(
     Returns:
         Initialized reference policy model in evaluation mode.
     """
+    _require_deepspeed()
     # inference model only has stage 3 (sharding) or stage 0 (no sharding)
     # stage 2 is optimizer sharding which doesn't apply to inference
     ref_policy: transformers.PreTrainedModel = transformers.AutoModelForCausalLM.from_pretrained(
@@ -534,20 +544,18 @@ def save_with_accelerate(
     # customize model card (TODO (Costa): this can be prettier)
 
 
-@torch.compile(dynamic=True)
-def log_softmax_and_gather(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-    """
-    torch compiled version of the common `log_softmax -> gather` operation.
-
-
-    The compiled version of this opration avoids the (significant) memory overhead of
-    allocating a new (batch_size, seq_len, vocab_size) tensor to store the logprobs.
-
-
-    See https://github.com/allenai/open-instruct/pull/584
-    """
+def _log_softmax_and_gather_impl(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """Compute log_softmax then gather at indices (non-compiled fallback)."""
     logprobs = logits.log_softmax(dim=-1)
     return torch.gather(logprobs, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+
+
+_DISABLE_TORCH_COMPILE = os.environ.get("OPEN_INSTRUCT_DISABLE_TORCH_COMPILE") == "1"
+if torch.cuda.is_available() and not _DISABLE_TORCH_COMPILE:
+    log_softmax_and_gather = torch.compile(dynamic=True)(_log_softmax_and_gather_impl)
+else:
+    # torch.compile is unreliable or unsupported on some backends (e.g., MPS/CPU).
+    log_softmax_and_gather = _log_softmax_and_gather_impl
 
 
 @retry_on_exception()
@@ -575,6 +583,13 @@ def push_folder_to_hub(
 
 # ----------------------------------------------------------------------------
 # DeepSpeed utilities
+def _require_deepspeed() -> None:
+    if deepspeed is None:
+        raise RuntimeError(
+            "DeepSpeed is required for this operation but is not installed."
+        ) from _DEEPSPEED_IMPORT_ERROR
+
+
 def get_all_parameters(sub_module, recurse=False):
     return itertools.chain(sub_module.named_parameters(recurse=recurse), sub_module.ds_external_parameters())
 
@@ -622,6 +637,7 @@ def unwrap_model_for_generation(
     if is_peft_model:
         unwrapped_model.pretrained_model.disable_adapter()
     if accelerator.state.deepspeed_plugin is not None and accelerator.state.deepspeed_plugin.zero_stage == 3:
+        _require_deepspeed()
         with deepspeed.zero.GatheredParameters(model.parameters()):
             remove_hooks(model)
             yield accelerator.unwrap_model(model)
@@ -645,7 +661,7 @@ def prepare_deepspeed(model: torch.nn.Module, per_device_train_batch_size: int, 
         `torch.nn.Module`:
             The model initialized and configured with DeepSpeed for training.
     """
-    import deepspeed  # noqa: PLC0415
+    _require_deepspeed()
 
     deepspeed_plugin = AcceleratorState().deepspeed_plugin
     config_kwargs = deepspeed_plugin.deepspeed_config

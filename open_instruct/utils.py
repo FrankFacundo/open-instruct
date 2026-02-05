@@ -53,7 +53,13 @@ from dataclasses import dataclass
 from multiprocessing import resource_tracker as _rt
 from typing import Any, NewType
 
-import beaker
+try:
+    import beaker
+except Exception as exc:
+    beaker = None
+    _BEAKER_IMPORT_ERROR = exc
+else:
+    _BEAKER_IMPORT_ERROR = None
 import numpy as np
 import ray
 import requests
@@ -84,6 +90,36 @@ INVALID_LOGPROB = 1.0  # Sentinel value for masked/invalid log probabilities
 logger = logger_utils.setup_logger(__name__)
 
 DataClassType = NewType("DataClassType", Any)
+
+
+def _require_beaker() -> None:
+    if beaker is None:
+        raise RuntimeError("Beaker is required for this operation but is not installed.") from _BEAKER_IMPORT_ERROR
+
+
+def is_mps_available() -> bool:
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is None:
+        return False
+    return bool(mps_backend.is_available() and mps_backend.is_built())
+
+
+def get_default_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if is_mps_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def resolve_dtype(device: torch.device, prefer_bf16: bool = True) -> torch.dtype:
+    if device.type == "cuda":
+        if prefer_bf16 and torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16
+    if device.type == "mps":
+        return torch.float16
+    return torch.float32
 
 
 def import_class_from_string(import_path: str) -> type:
@@ -1064,6 +1100,7 @@ def maybe_update_beaker_description(
     """
     if not is_beaker_job():
         return
+    _require_beaker()
 
     experiment_id = os.environ.get("BEAKER_WORKLOAD_ID")
     if not experiment_id:
@@ -2565,6 +2602,7 @@ def send_slack_message(message: str) -> None:
 def get_beaker_experiment_url() -> str | None:
     """If the env var BEAKER_WORKLOAD_ID is set, gets the current experiment URL."""
     try:
+        _require_beaker()
         beaker_client = beaker.Beaker.from_env()
         workload = beaker_client.workload.get(os.environ["BEAKER_WORKLOAD_ID"])
         url = beaker_client.experiment.url(workload.experiment)

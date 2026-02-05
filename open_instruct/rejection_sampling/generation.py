@@ -27,7 +27,15 @@ from huggingface_hub import HfApi
 from huggingface_hub.repocard import RepoCard
 from rich.pretty import pprint
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+
+try:
+    from vllm import LLM, SamplingParams
+except Exception as exc:
+    LLM = None
+    SamplingParams = None
+    _VLLM_IMPORT_ERROR = exc
+else:
+    _VLLM_IMPORT_ERROR = None
 
 from open_instruct.dataset_processor import INPUT_IDS_PROMPT_KEY, DatasetConfig, SFTDatasetProcessor
 from open_instruct.rejection_sampling.api_generate import LLMGenerationConfig, LLMProcessor  # Import your classes
@@ -37,6 +45,13 @@ api = HfApi()
 # we don't use `multiprocessing.cpu_count()` because typically we only have 12 CPUs
 # and that the shards might be small
 NUM_CPUS_FOR_DATASET_MAP = 4
+
+
+def _require_vllm() -> None:
+    if LLM is None or SamplingParams is None:
+        raise RuntimeError(
+            "vLLM is required for rejection sampling generation but is not installed."
+        ) from _VLLM_IMPORT_ERROR
 
 
 @dataclass
@@ -85,6 +100,7 @@ async def generate_with_openai(model_name: str, data_list: list, args: Args, gen
 
 
 def generate_with_vllm(model_name_or_path: str, revision: str, prompt_token_ids: list[int], gen_args: GenerationArgs):
+    _require_vllm()
     llm = LLM(
         model=model_name_or_path,
         revision=revision,

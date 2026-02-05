@@ -935,3 +935,47 @@ class TestUlyssesSPSplitter(unittest.TestCase):
         self.assertEqual(result.query_responses[0].shape[-1], 4)
         # Original sequence was [0,1,2,3], which fits exactly in rank 0's chunk
         torch.testing.assert_close(result.query_responses[0], torch.tensor([[0, 1, 2, 3]]))
+
+
+class TestDeviceHelpers(unittest.TestCase):
+    def test_get_default_device_prefers_cuda(self):
+        with (
+            mock.patch("torch.cuda.is_available", return_value=True),
+            mock.patch("open_instruct.utils.is_mps_available", return_value=True),
+        ):
+            device = utils.get_default_device()
+            self.assertEqual(device.type, "cuda")
+
+    def test_get_default_device_uses_mps_when_no_cuda(self):
+        with (
+            mock.patch("torch.cuda.is_available", return_value=False),
+            mock.patch("open_instruct.utils.is_mps_available", return_value=True),
+        ):
+            device = utils.get_default_device()
+            self.assertEqual(device.type, "mps")
+
+    def test_get_default_device_falls_back_to_cpu(self):
+        with (
+            mock.patch("torch.cuda.is_available", return_value=False),
+            mock.patch("open_instruct.utils.is_mps_available", return_value=False),
+        ):
+            device = utils.get_default_device()
+            self.assertEqual(device.type, "cpu")
+
+    def test_resolve_dtype_cuda_prefers_bf16_when_supported(self):
+        device = torch.device("cuda")
+        with mock.patch("torch.cuda.is_bf16_supported", return_value=True):
+            self.assertEqual(utils.resolve_dtype(device), torch.bfloat16)
+
+    def test_resolve_dtype_cuda_uses_fp16_when_bf16_unsupported(self):
+        device = torch.device("cuda")
+        with mock.patch("torch.cuda.is_bf16_supported", return_value=False):
+            self.assertEqual(utils.resolve_dtype(device), torch.float16)
+
+    def test_resolve_dtype_mps_uses_fp16(self):
+        device = torch.device("mps")
+        self.assertEqual(utils.resolve_dtype(device), torch.float16)
+
+    def test_resolve_dtype_cpu_uses_fp32(self):
+        device = torch.device("cpu")
+        self.assertEqual(utils.resolve_dtype(device), torch.float32)

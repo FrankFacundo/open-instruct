@@ -17,8 +17,10 @@ import contextlib
 import os
 
 os.environ["NCCL_CUMEM_ENABLE"] = "0"  # NOQA
-with contextlib.suppress(Exception):
+try:
     import deepspeed
+except Exception:
+    deepspeed = None
 
 # isort: on
 import json
@@ -69,6 +71,12 @@ from open_instruct.utils import (
 )
 
 logger = get_logger(__name__)
+
+
+def _maybe_gathered_parameters(params):
+    if deepspeed is None:
+        return contextlib.nullcontext()
+    return deepspeed.zero.GatheredParameters(params, modifier_rank=None)
 
 
 @dataclass
@@ -371,6 +379,23 @@ def main(args: FlatArguments, tc: TokenizerConfig):
             num_steps=args.gradient_accumulation_steps, sync_each_batch=args.sync_each_batch
         ),
     )
+    if accelerator.state.deepspeed_plugin is not None and deepspeed is None:
+        raise RuntimeError("DeepSpeed plugin requested but deepspeed is not installed.")
+    device = accelerator.device
+
+    if device.type != "cuda":
+        if args.use_flash_attn:
+            logger.warning("Disabling flash attention because device is %s.", device.type)
+            args.use_flash_attn = False
+        if args.use_liger_kernel:
+            raise ValueError("liger-kernel requires CUDA and is not supported on non-CUDA devices.")
+        if args.use_qlora or args.use_8bit_optimizer:
+            raise ValueError("QLoRA/8-bit optimizer requires CUDA and is not supported on non-CUDA devices.")
+        if args.fused_optimizer:
+            logger.warning("Disabling fused optimizer because device is %s.", device.type)
+            args.fused_optimizer = False
+
+    model_dtype = utils.resolve_dtype(device)
 
     # ------------------------------------------------------------
     # Setup tokenizer
@@ -517,7 +542,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=model_dtype,
             )
             device_index = accelerator.local_process_index
             device_map = {"": device_index}  # force data-parallel training.
@@ -529,7 +554,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                 trust_remote_code=tc.trust_remote_code,
                 quantization_config=bnb_config,
                 device_map=device_map,
-                dtype=torch.bfloat16,
+                dtype=model_dtype,
                 attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
             )
         elif args.use_liger_kernel:
@@ -557,7 +582,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                 config=config,
                 trust_remote_code=tc.trust_remote_code,
                 low_cpu_mem_usage=args.low_cpu_mem_usage,
-                dtype=torch.bfloat16,
+                dtype=model_dtype,
                 attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
             )
     else:
@@ -568,7 +593,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
     # on a small vocab and want a smaller embedding size, remove this test.
     # gather deepspeed to get "real" embedding size
     embeddings = model.get_input_embeddings()
-    with deepspeed.zero.GatheredParameters(embeddings.weight, modifier_rank=None):
+    with _maybe_gathered_parameters(embeddings.weight):
         embedding_size = embeddings.weight.shape[0]
     # resize does its own gather
     if len(tokenizer) > embedding_size:
@@ -576,7 +601,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
         model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
     # update embedding size after resizing for sum loss
     embeddings = model.get_input_embeddings()
-    with deepspeed.zero.GatheredParameters(embeddings.weight, modifier_rank=None):
+    with _maybe_gathered_parameters(embeddings.weight):
         embedding_size = embeddings.weight.shape[0]
 
     if args.use_lora:

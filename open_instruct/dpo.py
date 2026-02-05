@@ -10,7 +10,13 @@ import pathlib
 import shutil
 from functools import partial
 
-import bitsandbytes.optim
+try:
+    import bitsandbytes
+except Exception as exc:
+    bitsandbytes = None
+    _BITSANDBYTES_IMPORT_ERROR = exc
+else:
+    _BITSANDBYTES_IMPORT_ERROR = None
 import torch
 import torch.distributed as dist
 import transformers
@@ -200,6 +206,10 @@ def _setup_optimizer_and_scheduler(args: dpo_utils.ExperimentConfig, model, num_
         {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
     if args.dpo_use_paged_optimizer:
+        if bitsandbytes is None:
+            raise RuntimeError("bitsandbytes is required for paged optimizers but is not installed.") from (
+                _BITSANDBYTES_IMPORT_ERROR
+            )
         optim = bitsandbytes.optim.AdamW(
             optimizer_grouped_parameters,
             lr=args.learning_rate,
@@ -376,7 +386,9 @@ def main(args: dpo_utils.ExperimentConfig, tc: dataset_transformation.TokenizerC
     if distributed_utils.is_distributed():
         dist.barrier()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = utils.get_default_device()
+    if device.type != "cuda":
+        raise RuntimeError("DPO training requires CUDA and is not supported on non-CUDA devices.")
 
     model, model_config = _setup_model(args, device)
 

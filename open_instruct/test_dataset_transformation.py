@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 
+import torch
 from parameterized import parameterized
 
 import open_instruct.dataset_transformation
@@ -85,6 +86,30 @@ class TestConfigHash(unittest.TestCase):
         hash1 = open_instruct.dataset_transformation.compute_config_hash(dcs1, tc)
         hash2 = open_instruct.dataset_transformation.compute_config_hash(dcs2, tc)
         self.assertNotEqual(hash1, hash2, "Different configs should have different hashes")
+
+
+class TestChatTemplateCompat(unittest.TestCase):
+    def test_apply_chat_template_no_dict_with_new_signature(self):
+        class NewTokenizer:
+            def apply_chat_template(self, *args, return_dict=True, **kwargs):
+                if return_dict:
+                    return {"input_ids": [1, 2, 3]}
+                return [1, 2, 3]
+
+        tokenizer = NewTokenizer()
+        result = open_instruct.dataset_transformation._apply_chat_template_no_dict(tokenizer, [{"role": "user"}])
+        self.assertEqual(result, [1, 2, 3])
+
+    def test_apply_chat_template_no_dict_with_old_signature(self):
+        class OldTokenizer:
+            def apply_chat_template(self, *args, **kwargs):
+                return torch.tensor([[1, 2, 3]])
+
+        tokenizer = OldTokenizer()
+        result = open_instruct.dataset_transformation._apply_chat_template_no_dict(
+            tokenizer, [{"role": "user"}], return_tensors="pt"
+        )
+        self.assertTrue(torch.equal(result, torch.tensor([[1, 2, 3]])))
 
 
 class TestCachedDataset(unittest.TestCase):

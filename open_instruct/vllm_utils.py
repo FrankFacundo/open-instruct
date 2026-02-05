@@ -33,13 +33,11 @@ from typing import Any
 import aiohttp
 import backoff
 import datasets
-import deepspeed
 import openai
 import ray
 import torch
 import torch.distributed
 import uvicorn
-import vllm
 from ray.util import queue as ray_queue
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -53,10 +51,33 @@ from torch.distributed.distributed_c10d import (
     default_pg_timeout,
     rendezvous,
 )
-from vllm.entrypoints.openai.api_server import build_app, init_app_state
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.v1.core import kv_cache_utils
+
+try:
+    import deepspeed
+except Exception as exc:
+    deepspeed = None
+    _DEEPSPEED_IMPORT_ERROR = exc
+else:
+    _DEEPSPEED_IMPORT_ERROR = None
+
+try:
+    import vllm
+    from vllm.entrypoints.openai.api_server import build_app, init_app_state
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.core import kv_cache_utils
+
+    VLLM_AVAILABLE = True
+    _VLLM_IMPORT_ERROR = None
+except Exception as exc:
+    vllm = None
+    build_app = None
+    init_app_state = None
+    make_arg_parser = None
+    FlexibleArgumentParser = None
+    kv_cache_utils = None
+    VLLM_AVAILABLE = False
+    _VLLM_IMPORT_ERROR = exc
 
 from open_instruct import logger_utils
 from open_instruct.data_types import GenerationResult, PromptRequest, RequestInfo, TokenStatistics, ToolCallStats
@@ -75,7 +96,20 @@ INFERENCE_INIT_TIMEOUT_S = 1200
 VLLM_HEALTH_CHECK_TIMEOUT_S = 600.0
 
 
+def _require_vllm() -> None:
+    if not VLLM_AVAILABLE:
+        raise RuntimeError("vLLM is required for this operation but is not installed.") from _VLLM_IMPORT_ERROR
+
+
+def _require_deepspeed() -> None:
+    if deepspeed is None:
+        raise RuntimeError(
+            "DeepSpeed is required for this operation but is not installed."
+        ) from _DEEPSPEED_IMPORT_ERROR
+
+
 def model_dims_from_vllm_config(vllm_config: "vllm.config.VllmConfig") -> ModelDims:
+    _require_vllm()
     model_config = vllm_config.model_config
     hidden_size = model_config.get_hidden_size()
     intermediate_size = getattr(model_config.hf_text_config, "intermediate_size", 4 * hidden_size)
@@ -482,6 +516,7 @@ FALLBACK_CHAT_TEMPLATE = "{% for message in messages %}{{ message['content'] }}{
 
 
 def _create_server_args(model_path: str, has_chat_template: bool) -> argparse.Namespace:
+    _require_vllm()
     parser = FlexibleArgumentParser()
     parser = make_arg_parser(parser)
     cli_args = ["--model", model_path]
@@ -670,6 +705,7 @@ class LLMRayActor:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in ray.get_gpu_ids())
 
     def _setup_and_start_async_engine(self, args, bundle_indices, kwargs) -> None:
+        _require_vllm()
         num_gpus = kwargs.pop("num_gpus")
         if bundle_indices is not None:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
@@ -1080,6 +1116,7 @@ def create_vllm_engines(
     eval_dataset=None,
     vllm_dtype: str = "bfloat16",
 ) -> list[ray.actor.ActorHandle]:
+    _require_vllm()
     # Convert max_tool_calls to a dict mapping tool end strings to their limits
     vllm_engines = []
     # Use "mp" (multiprocessing) for TP > 1 when running inside a Ray actor.
@@ -1213,6 +1250,7 @@ def broadcast_weights_to_vllm(
     Returns:
         List of Ray ObjectRefs for the weight update calls (empty on non-rank-0)
     """
+    _require_deepspeed()
     is_rank_0 = torch.distributed.get_rank() == 0
     params = list(model.named_parameters())
     num_params = len(params)

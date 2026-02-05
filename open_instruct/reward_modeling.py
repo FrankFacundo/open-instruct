@@ -4,7 +4,13 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-import deepspeed
+try:
+    import deepspeed
+except Exception as exc:
+    deepspeed = None
+    _DEEPSPEED_IMPORT_ERROR = exc
+else:
+    _DEEPSPEED_IMPORT_ERROR = None
 import numpy as np
 import pandas as pd
 import torch
@@ -50,6 +56,13 @@ from open_instruct.utils import (
 )
 
 api = HfApi()
+
+
+def _require_deepspeed() -> None:
+    if deepspeed is None:
+        raise RuntimeError(
+            "DeepSpeed is required for reward modeling but is not installed."
+        ) from _DEEPSPEED_IMPORT_ERROR
 
 
 @dataclass
@@ -163,6 +176,9 @@ def layer_init(layer: nn.Module, std: float):
 
 
 def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig):
+    _require_deepspeed()
+    if not torch.cuda.is_available():
+        raise RuntimeError("Reward modeling requires CUDA and is not supported on non-CUDA devices.")
     AutoModelForSequenceClassification.register(olmo_adapter.Olmo2Config, olmo_adapter.Olmo2ForSequenceClassification)
     AutoModelForSequenceClassification.register(olmo_adapter.OlmoeConfig, olmo_adapter.OlmoeForSequenceClassification)
 

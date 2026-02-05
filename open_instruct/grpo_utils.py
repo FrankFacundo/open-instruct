@@ -28,6 +28,8 @@ class ExperimentConfig:
     """Seed of the experiment"""
     run_name: str | None = None
     """RUNTIME VALUE: A unique name of this run"""
+    runtime_backend: Literal["cuda", "local"] = "cuda"
+    """Training backend. 'cuda' uses DeepSpeed + Ray + vLLM. 'local' runs single-process on CPU/MPS."""
 
     # Optimizer
     learning_rate: float = 2e-5
